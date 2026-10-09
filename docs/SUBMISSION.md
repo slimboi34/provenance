@@ -25,14 +25,17 @@ Escalations: mcp-review@anthropic.com
 
 > Provenance gives Claude exact access to Excel workbooks (.xlsx, .xlsm). Instead of eyeballing a spreadsheet, Claude reads every cell and formula, recalculates the workbook in Python with Excel's semantics, and reports which results are verified.
 >
-> - Inspect: sheets, values and formulas as a clean table.
-> - Recalculate: "what if units were 500?" Change any input cells and get every affected result, before and after, without Excel.
-> - Explain: how a cell is calculated, what it reads, and whether its formula was verified.
+> - Inspect and find: sheets, values and formulas as a table; search for any label, number or formula.
+> - Explain and trace: how a cell is calculated, what feeds it, what depends on it, and whether it is verified.
+> - What-if: change input cells and get every affected result, before and after, without Excel.
+> - Goal seek: find the input that makes a result hit a target ("what price gets profit to 10,000?").
+> - Sensitivity tables: one- or two-way data tables over ranges of inputs.
+> - Compare: every changed value, formula and sheet between two versions of a workbook.
 > - Convert and certify: lossless canonical JSON plus a Python module of every formula, with a certificate. Structure is proven by rebuilding the file, each formula is replayed against the result Excel stored, and the formulas are fuzz-tested against an independent engine.
 >
 > Formulas Provenance does not fully model are labelled unverified with the reason, never guessed, so Claude can tell you which numbers to trust.
 >
-> Send a workbook as a public https link (Google Sheets share links work) or as file contents. The hosted server handles typical workbooks (up to about 1 MB compressed); larger files run with the free local version. Files are processed in an isolated process and deleted when the call ends. Nothing is stored.
+> Give Claude a workbook by dropping it on the upload page (you get a file id to paste into your chat; the file is deleted after an hour) or by sharing a public https link (Google Sheets share links work). The hosted server handles typical workbooks (up to about 1 MB compressed); larger files run with the free local version. Nothing is kept after use.
 
 **Categories**: Data & Analytics; Productivity; Finance
 
@@ -43,7 +46,8 @@ Escalations: mcp-review@anthropic.com
 ## Use cases
 
 - Answer questions about a spreadsheet using exact cell values instead of a lossy read
-- What-if analysis on financial, pricing and budget models
+- What-if analysis, goal seeking and sensitivity tables on financial, pricing and budget models
+- See what changed between two versions of a model
 - Audit a workbook: which formulas reproduce Excel's results and which can't be verified
 - Convert a workbook into JSON and Python for use in code
 
@@ -62,8 +66,11 @@ Own software; no third-party API. Only fetches a URL the user supplies. No healt
 No credentials needed. Add `https://mcp-production-5fd2.up.railway.app/mcp` as a custom connector, then:
 
 1. "Inspect this workbook: https://raw.githubusercontent.com/slimboi34/provenance/main/docs/sample-budget.xlsx"
-2. "In that workbook, set Budget!B2 to 40 and tell me the new Budget!D6"
-3. "Explain how Budget!D12 is calculated and whether it's verified"
-4. "Convert it and give me the verdict"
+2. "Where is the tax figure, and how is it calculated? Trace it back to its inputs."
+3. "Set Budget!B2 to 40 and tell me the new total."
+4. "What quantity of widgets (B2) makes the total (D6) exactly 100?"
+5. "Show how the tax (D12) changes as the VAT rate (Rates!B1) goes from 0% to 30%."
+6. "Compare it with itself" (or with any edited copy) and "Convert it and give me the verdict."
+7. Upload flow: open https://mcp-production-5fd2.up.railway.app/upload, drop the sample file, paste the line it gives into the chat, and ask anything above.
 
 Sample workbook URL for reviewers: https://raw.githubusercontent.com/slimboi34/provenance/main/docs/sample-budget.xlsx

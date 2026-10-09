@@ -19,23 +19,26 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 import binascii
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from . import __version__
 from .canon import ConversionError, sha256
@@ -50,12 +53,17 @@ SUFFIXES = (".xlsx", ".xlsm", ".docx")
 CELL_KEY = re.compile(r"^(?:'(?:[^']|'')+'|[^!'\s][^!]*)!\$?[A-Za-z]{1,3}\$?[0-9]{1,7}$")
 
 INSTRUCTIONS = """\
-Provenance reads Excel workbooks (.xlsx/.xlsm) exactly and recalculates them in Python.
-Use inspect_workbook to see sheets, values and formulas; convert_workbook for the full
-verified conversion and its certificate; recalculate_workbook for what-if questions
-("what is the total if B2 is 40?"); explain_cells to trace a cell's formula and whether
-it was verified. Cell keys look like "Sheet1!B2". Values of cells marked unverified must
-not be presented as Excel's answer."""
+Provenance reads Excel workbooks (.xlsx/.xlsm) exactly and recalculates them in Python with
+Excel's semantics. Start with inspect_workbook (or find_cells in a big workbook) to learn the
+layout, then: explain_cells / trace_cells for how a number is calculated; recalculate_workbook
+for what-if questions; goal_seek to hit a target; sensitivity_table to see how outputs respond
+to an input; compare_workbooks for what changed between versions; convert_workbook for the
+certified JSON + Python conversion. Cell keys look like "Sheet1!B2". A cell whose status is
+unverified, mismatch or disputed must not be presented as Excel's answer; say it is unverified."""
+
+UPLOAD_HINT = """
+If the user has a spreadsheet in this conversation but no public link, ask them to upload it at
+{url}/upload and paste back the file_id it shows (valid for 1 hour). Never guess file contents."""
 
 
 class ToolError(Exception):
@@ -116,13 +124,73 @@ def _fetch(url: str, remote: bool) -> tuple[bytes, str]:
     raise ToolError("too many redirects")
 
 
-def load_source(path: str | None, url: str | None, content_base64: str | None, filename: str | None,
-                remote: bool) -> tuple[bytes, str]:
-    """Return (bytes, file name) for the one source the caller gave."""
-    given = [s for s in (path, url, content_base64) if s]
+# Upload store (hosted mode): a person drops a file on /upload and gives Claude the file_id.
+# Files are never served back, only read by tool calls, and are deleted after UPLOAD_TTL.
+UPLOADS = Path(os.environ.get("PROVENANCE_UPLOAD_DIR", Path(tempfile.gettempdir()) / "provenance-uploads"))
+UPLOAD_TTL = 3600
+UPLOAD_STORE_MAX = int(os.environ.get("PROVENANCE_UPLOAD_STORE_MB", "300")) << 20
+FILE_ID = re.compile(r"^pv_[A-Za-z0-9_-]{24,48}$")
+PUBLIC_URL = os.environ.get("PROVENANCE_PUBLIC_URL") or (
+    f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}" if os.environ.get("RAILWAY_PUBLIC_DOMAIN") else "")
+_UPLOAD_LOCK = threading.Lock()
+UPLOADS_PER_HOUR = int(os.environ.get("PROVENANCE_UPLOADS_PER_HOUR", "30"))
+_UPLOAD_TIMES: dict[str, list[float]] = {}
+
+
+def _sweep_uploads() -> int:
+    """Delete expired uploads; return the bytes still stored."""
+    total, cutoff = 0, time.time() - UPLOAD_TTL
+    for p in UPLOADS.glob("pv_*") if UPLOADS.is_dir() else ():
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+            else:
+                total += p.stat().st_size
+        except FileNotFoundError:
+            pass
+    return total
+
+
+def store_upload(data: bytes, name: str) -> str:
+    if not data.startswith(b"PK\x03\x04"):
+        raise ToolError("that is not an Excel workbook (.xlsx / .xlsm)")
+    if len(data) > MAX_BYTES:
+        raise ToolError(f"file is larger than {MAX_BYTES >> 20} MB")
+    with _UPLOAD_LOCK:
+        UPLOADS.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if _sweep_uploads() + len(data) > UPLOAD_STORE_MAX:
+            raise ToolError("the upload store is full right now; try again in a few minutes")
+        file_id = "pv_" + secrets.token_urlsafe(24)
+        (UPLOADS / file_id).write_bytes(data)
+        (UPLOADS / f"{file_id}.name").write_text(Path(name).name[:200] or "workbook.xlsx", encoding="utf-8")
+    return file_id
+
+
+def load_upload(file_id: str) -> tuple[bytes, str]:
+    path = UPLOADS / file_id.strip()
+    if not FILE_ID.match(file_id.strip()) or not path.is_file() or path.stat().st_mtime < time.time() - UPLOAD_TTL:
+        where = f" at {PUBLIC_URL}/upload" if PUBLIC_URL else ""
+        raise ToolError(f"file_id {file_id!r} is unknown or has expired (uploads last 1 hour); "
+                        f"ask the user to upload the file again{where}")
+    name_file = path.with_name(f"{path.name}.name")
+    return path.read_bytes(), name_file.read_text(encoding="utf-8") if name_file.exists() else "workbook.xlsx"
+
+
+SOURCE_KEYS = ("path", "file_id", "url", "content_base64")
+
+
+def load_source(src: dict, remote: bool) -> tuple[bytes, str]:
+    """Return (bytes, file name) for the one source in src (path / file_id / url / content_base64)."""
+    path, file_id, url, content_base64 = (src.get(k) for k in SOURCE_KEYS)
+    filename = src.get("filename")
+    given = [s for s in (path, file_id, url, content_base64) if s]
     if len(given) != 1:
-        options = "url or content_base64" if remote else "path, url or content_base64"
+        options = "file_id, url or content_base64" if remote else "path, url or content_base64"
         raise ToolError(f"give exactly one of {options}")
+    if file_id:
+        if not remote:
+            raise ToolError("file_id is for the hosted server; locally, give the file's path")
+        return load_upload(file_id)
     if path:
         if remote:
             raise ToolError("this is a hosted server: send the file as url or content_base64, not a path")
@@ -389,7 +457,406 @@ def op_explain(data: bytes, name: str, p: dict) -> dict:
     return {"file": name, "cells": out}
 
 
-OPS = {"inspect": op_inspect, "convert": op_convert, "recalculate": op_recalculate, "explain": op_explain}
+def _labels(sheet: dict, ref: str) -> dict:
+    """The nearest text to the left (row label) and above (column header) of a cell."""
+    from .formula import a1, split_a1
+    row, col = split_a1(ref)
+    out = {}
+    for c in range(col - 1, max(0, col - 30), -1):
+        v = sheet["cells"].get(a1(row, c), {}).get("v")
+        if isinstance(v, str) and v.strip():
+            out["row_label"] = v
+            break
+    for r in range(max(1, row - 200), row):  # the topmost text above: the column's header
+        v = sheet["cells"].get(a1(r, col), {}).get("v")
+        if isinstance(v, str) and v.strip():
+            out["column_label"] = v
+            break
+    return out
+
+
+def op_find(data: bytes, name: str, p: dict) -> dict:
+    a = analyse(data, name)
+    a.require_workbook()
+    from .formula import split_a1
+    query, mode, where = p["query"], p.get("match", "contains"), p.get("search_in", "both")
+    if mode == "regex":
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ToolError(f"bad regex: {exc}") from None
+    number = None
+    try:
+        number = float(str(query).replace(",", ""))
+    except ValueError:
+        pass
+
+    def hit(text) -> bool:
+        if text is None:
+            return False
+        if isinstance(text, (int, float)) and not isinstance(text, bool) and number is not None and mode != "regex":
+            return abs(text - number) <= 1e-9 * max(1.0, abs(number))
+        s = str(text)
+        if mode == "regex":
+            return bool(pattern.search(s))
+        if mode == "exact":
+            return s.strip().lower() == str(query).strip().lower()
+        return str(query).lower() in s.lower()
+
+    found, total = [], 0
+    for sheet in a.model["sheets"]:
+        if p.get("sheet") and sheet["name"].lower() != p["sheet"].lower():
+            continue
+        for ref in sorted(sheet["cells"], key=split_a1):
+            cell = sheet["cells"][ref]
+            in_value = where in ("values", "both") and hit(_stored(cell))
+            in_formula = where in ("formulas", "both") and "f" in cell and hit(cell["f"])
+            if not (in_value or in_formula):
+                continue
+            total += 1
+            if len(found) < p.get("limit", 50):
+                k = f"{sheet['name']}!{ref}"
+                entry = {"cell": k, "value": _stored(cell), **_labels(sheet, ref)}
+                if "f" in cell:
+                    entry.update(formula="=" + cell["f"], status=a.status(k))
+                found.append(entry)
+    return {"file": name, "query": query, "matches": total, "results": found, "truncated": total > len(found)}
+
+
+def _parse_range(key: str):
+    """'Sheet!A1:C9' or 'Sheet!B2' -> (sheet, r1, c1, r2, c2)."""
+    from .formula import split_a1
+    sheet, ref = key.rsplit("!", 1)
+    first, _, last = ref.partition(":")
+    r1, c1 = split_a1(first)
+    r2, c2 = split_a1(last) if last else (r1, c1)
+    return sheet, min(r1, r2), min(c1, c2), max(r1, r2), max(c1, c2)
+
+
+class _Graph:
+    """Precedents and dependents of formula cells, from the compiled DEPS."""
+
+    def __init__(self, a: Analysis):
+        self.deps = a.namespace.get("DEPS", {}) if a.logic else {}
+        self.single: dict[str, set] = {}
+        self.ranges: list[tuple] = []
+        for cell, reads in self.deps.items():
+            for r in reads:
+                if ":" in r:
+                    self.ranges.append((_parse_range(r), cell))
+                else:
+                    self.single.setdefault(r, set()).add(cell)
+
+    def dependents(self, key: str) -> list[str]:
+        sheet, r, c, _, _ = _parse_range(key)
+        out = set(self.single.get(key, ()))
+        for (s, r1, c1, r2, c2), cell in self.ranges:
+            if s == sheet and r1 <= r <= r2 and c1 <= c <= c2:
+                out.add(cell)
+        return sorted(out)
+
+    def formula_cells_in(self, rng: str) -> list[str]:
+        if ":" not in rng:
+            return [rng] if rng in self.deps else []
+        s, r1, c1, r2, c2 = _parse_range(rng)
+        return [k for k in self.deps if k.rsplit("!", 1)[0] == s and
+                (lambda t: r1 <= t[1] <= r2 and c1 <= t[2] <= c2)(_parse_range(k))]
+
+
+def op_trace(data: bytes, name: str, p: dict) -> dict:
+    a = analyse(data, name)
+    a.require_workbook()
+    g = _Graph(a)
+    depth, direction, budget = max(1, min(p.get("depth", 3), 10)), p.get("direction", "both"), [400]
+
+    def node(k: str) -> dict:
+        cell = a.cell(k) if ":" not in k else None
+        out: dict[str, Any] = {"cell": k}
+        if cell and "f" in cell:
+            out.update(formula="=" + cell["f"], value=_stored(cell), status=a.status(k))
+        elif ":" not in k:
+            out.update(value=_stored(cell), kind="input" if cell else "empty")
+        return out
+
+    def up(k: str, level: int, seen: set) -> dict:
+        out = node(k)
+        if level >= depth or budget[0] <= 0:
+            return out
+        children = []
+        for r in g.deps.get(k, ()):
+            budget[0] -= 1
+            if r in seen:
+                continue
+            seen.add(r)
+            child = up(r, level + 1, seen) if ":" not in r else node(r)
+            if ":" in r and level + 1 < depth:
+                child["formula_cells_inside"] = [up(f, level + 2, seen) for f in g.formula_cells_in(r)[:20]]
+            children.append(child)
+        if children:
+            out["reads"] = children
+        return out
+
+    def down(k: str, level: int, seen: set) -> dict:
+        out = node(k)
+        if level >= depth or budget[0] <= 0:
+            return out
+        children = []
+        for d in g.dependents(k):
+            budget[0] -= 1
+            if d not in seen:
+                seen.add(d)
+                children.append(down(d, level + 1, seen))
+        if children:
+            out["used_by"] = children
+        return out
+
+    def driving_inputs(k: str) -> list[str]:
+        stack, seen, inputs = [k], {k}, set()
+        while stack and len(seen) < 20000:
+            for r in g.deps.get(stack.pop(), ()):
+                if r in seen:
+                    continue
+                seen.add(r)
+                inner = g.formula_cells_in(r)
+                stack.extend(inner)
+                if ":" in r or r not in g.deps:
+                    inputs.add(r)
+        return sorted(inputs)[:200]
+
+    results = []
+    for k in [a.canonical(c) for c in p["cells"]][:10]:
+        entry: dict[str, Any] = {"cell": k}
+        if direction in ("precedents", "both"):
+            entry["precedents"] = up(k, 0, {k})
+            entry["driving_inputs"] = driving_inputs(k)
+        if direction in ("dependents", "both"):
+            entry["dependents"] = down(k, 0, {k})
+        results.append(entry)
+    return {"file": name, "depth": depth, "results": results, "truncated": budget[0] <= 0}
+
+
+def _number(v, what: str) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ToolError(f"{what} is {_plain(v)!r}, not a number")
+    return float(v)
+
+
+def _recalc_numeric(a: Analysis, overrides: dict, target: str) -> float:
+    values, failed = a.namespace["compute"](overrides)
+    if target in failed:
+        raise ToolError(f"{target} cannot be computed: {failed[target]}")
+    return _number(values.get(target), f"{target} (with {overrides})")
+
+
+def _formula_target(a: Analysis, key: str) -> str:
+    k = a.canonical(key)
+    cell = a.cell(k)
+    if not cell or "f" not in cell:
+        raise ToolError(f"{k} is not a formula cell; pick the result cell")
+    return k
+
+
+def _input_cell(a: Analysis, key: str) -> str:
+    k = a.canonical(key)
+    cell = a.cell(k)
+    if cell and "f" in cell:
+        raise ToolError(f"{k} holds a formula; choose an input cell it depends on")
+    return k
+
+
+def _trust(a: Analysis, k: str) -> dict:
+    status = a.status(k)
+    out = {"status": status}
+    if status in ("unverified", "mismatch", "disputed"):
+        out["warning"] = a.reason(k) or "not verified: do not present this as Excel's answer"
+    return out
+
+
+def op_goal_seek(data: bytes, name: str, p: dict) -> dict:
+    a = analyse(data, name)
+    a.require_workbook()
+    if not a.logic:
+        raise ToolError("the workbook has no formulas")
+    target, changing = _formula_target(a, p["target_cell"]), _input_cell(a, p["changing_cell"])
+    goal, tol = float(p["target_value"]), float(p.get("tolerance") or 1e-7)
+    max_iter = max(10, min(int(p.get("max_iterations") or 200), 500))
+    start = a.cell(changing)
+    x0 = float(_stored(start)) if isinstance(_stored(start), (int, float)) and not isinstance(_stored(start), bool) else 0.0
+    calls = [0]
+
+    def f(x: float) -> float:
+        calls[0] += 1
+        return _recalc_numeric(a, {changing: x}, target) - goal
+
+    def scale(v):  # tolerance relative to the size of the goal
+        return tol * max(1.0, abs(goal))
+
+    lo, hi = p.get("lower"), p.get("upper")
+    solution, fx = None, None
+    if lo is None and hi is None:
+        # Secant from the current value: fast for the smooth models most workbooks are.
+        start_x = x0
+        f0 = f(x0)
+        try:
+            x1 = x0 * 1.01 + (0.01 if x0 == 0 else 0)
+            f1 = f(x1)
+            for _ in range(60):
+                if abs(f1) <= scale(f1):
+                    solution, fx = x1, f1
+                    break
+                if f1 == f0:
+                    break
+                x0, f0, x1 = x1, f1, x1 - f1 * (x1 - x0) / (f1 - f0)
+                f1 = f(x1)
+        except (ToolError, OverflowError, ZeroDivisionError):
+            pass  # the secant stepped somewhere the formula fails; fall back to bracketing
+        if solution is None:
+            x0, f0 = start_x, f(start_x)
+            # Look outward from the start for a sign change, then bisect.
+            step, base, fb = max(1.0, abs(x0)), x0, f0
+            for _ in range(60):
+                for cand in (base - step, base + step):
+                    try:
+                        fc = f(cand)
+                    except ToolError:
+                        continue
+                    if (fc <= 0) != (fb <= 0):
+                        lo, hi = sorted((base, cand))
+                        break
+                if lo is not None:
+                    break
+                step *= 2
+    if solution is None:
+        if lo is None or hi is None:
+            raise ToolError(f"no value of {changing} found that makes {target} = {goal:g}; try giving lower and upper "
+                            "bounds that bracket the answer")
+        lo, hi = float(lo), float(hi)
+        flo, fhi = f(lo), f(hi)
+        if (flo <= 0) == (fhi <= 0):
+            raise ToolError(f"{target} - {goal:g} has the same sign at {changing} = {lo:g} and {hi:g} "
+                            f"({flo + goal:g} and {fhi + goal:g}); widen the bounds")
+        for _ in range(max_iter):
+            mid = (lo + hi) / 2
+            fm = f(mid)
+            if abs(fm) <= scale(fm) or hi - lo <= 1e-12 * max(1.0, abs(mid)):
+                solution, fx = mid, fm
+                break
+            if (fm <= 0) == (flo <= 0):
+                lo, flo = mid, fm
+            else:
+                hi = mid
+        else:
+            solution, fx = mid, fm
+    return {
+        "file": name,
+        "changing_cell": changing,
+        "solution": solution,
+        "original_value": _stored(start),
+        "target_cell": target,
+        "target_value": goal,
+        "achieved_value": fx + goal,
+        "evaluations": calls[0],
+        **_trust(a, target),
+    }
+
+
+def _value_list(p: dict, prefix: str) -> list:
+    values = p.get(f"{prefix}values")
+    if values:
+        return [_coerce(v) for v in values][:100]
+    start, stop, steps = p.get(f"{prefix}start"), p.get(f"{prefix}stop"), p.get(f"{prefix}steps") or 11
+    if start is None or stop is None:
+        raise ToolError(f"give {prefix}values, or {prefix}start and {prefix}stop")
+    steps = max(2, min(int(steps), 100))
+    return [round(float(start) + (float(stop) - float(start)) * i / (steps - 1), 12) for i in range(steps)]
+
+
+def op_sensitivity(data: bytes, name: str, p: dict) -> dict:
+    a = analyse(data, name)
+    a.require_workbook()
+    if not a.logic:
+        raise ToolError("the workbook has no formulas")
+    x = _input_cell(a, p["input_cell"])
+    xs = _value_list(p, "")
+    outputs = [_formula_target(a, c) for c in p["output_cells"]][:10]
+    compute = a.namespace["compute"]
+    base, _ = compute()
+    if p.get("second_input_cell"):
+        y = _input_cell(a, p["second_input_cell"])
+        ys = _value_list(p, "second_")
+        if len(xs) * len(ys) > 400:
+            raise ToolError("a two-way table is limited to 400 cells; use fewer values")
+        out = outputs[0]
+        grid = []
+        for xv in xs:
+            row = []
+            for yv in ys:
+                values, failed = compute({x: xv, y: yv})
+                row.append(_plain(values.get(out)) if out not in failed else f"error: {failed[out]}")
+            grid.append(row)
+        return {"file": name, "output_cell": out, "rows": {"cell": x, "values": xs},
+                "columns": {"cell": y, "values": ys}, "table": grid, "base_value": _plain(base.get(out)),
+                **_trust(a, out)}
+    rows = []
+    for xv in xs:
+        values, failed = compute({x: xv})
+        rows.append({x: xv, **{o: (_plain(values.get(o)) if o not in failed else f"error: {failed[o]}") for o in outputs}})
+    return {"file": name, "input_cell": x, "original_input": _stored(a.cell(x)),
+            "base_values": {o: _plain(base.get(o)) for o in outputs}, "rows": rows,
+            "trust": {o: _trust(a, o) for o in outputs}}
+
+
+def op_compare(data: bytes, name: str, p: dict) -> dict:
+    other = p["_other"]
+    a = analyse(data, name)
+    b = analyse(base64.b64decode(other["b64"]), other["name"])
+    a.require_workbook()
+    b.require_workbook()
+    from .formula import split_a1
+    sheets_a = {s["name"]: s for s in a.model["sheets"]}
+    sheets_b = {s["name"]: s for s in b.model["sheets"]}
+    changes, counts = [], {"value_changed": 0, "formula_changed": 0, "added": 0, "removed": 0}
+    limit = max(1, min(p.get("limit", 200), MAX_CELLS_RETURNED))
+    for sname in [s for s in sheets_a if s in sheets_b]:
+        ca, cb = sheets_a[sname]["cells"], sheets_b[sname]["cells"]
+        for ref in sorted(set(ca) | set(cb), key=split_a1):
+            x, y = ca.get(ref), cb.get(ref)
+            vx, vy = _stored(x), _stored(y)
+            fx, fy = (x or {}).get("f"), (y or {}).get("f")
+            if x is None or (vx is None and fx is None):
+                kind = "added" if (vy is not None or fy) else None
+            elif y is None or (vy is None and fy is None):
+                kind = "removed"
+            elif fx != fy:
+                kind = "formula_changed"
+            elif vx != vy and not (isinstance(vx, float) and isinstance(vy, float)
+                                   and abs(vx - vy) <= 1e-12 * max(1.0, abs(vx))):
+                kind = "value_changed"
+            else:
+                kind = None
+            if not kind:
+                continue
+            counts[kind] += 1
+            if len(changes) < limit:
+                entry = {"cell": f"{sname}!{ref}", "change": kind, "before": vx, "after": vy,
+                         **_labels(sheets_b[sname] if y else sheets_a[sname], ref)}
+                if fx or fy:
+                    entry.update(formula_before=fx and "=" + fx, formula_after=fy and "=" + fy)
+                changes.append(entry)
+    return {
+        "before": name, "after": other["name"],
+        "sheets_added": [s for s in sheets_b if s not in sheets_a],
+        "sheets_removed": [s for s in sheets_a if s not in sheets_b],
+        "counts": counts,
+        "changes": changes,
+        "truncated": sum(counts.values()) > len(changes),
+        "verdicts": {"before": a.certificate["verdict"]["level"], "after": b.certificate["verdict"]["level"]},
+    }
+
+
+OPS = {"inspect": op_inspect, "convert": op_convert, "recalculate": op_recalculate, "explain": op_explain,
+       "find": op_find, "trace": op_trace, "goal_seek": op_goal_seek, "sensitivity": op_sensitivity,
+       "compare": op_compare}
 
 
 def _limit_memory():  # runs in the worker before exec
@@ -452,6 +919,136 @@ def _worker() -> int:
 
 # -------------------------------------------------------------------- server
 
+REQUIRED = inspect.Parameter.empty
+
+
+def _p(annotation, description: str, default=None):
+    """A tool parameter: (annotation with its description, default)."""
+    from pydantic import Field
+    return Annotated[annotation, Field(description=description)], default
+
+
+CELL = "a cell key like 'Sheet1!B2'"
+
+# name -> (op, title, read_only_locally, description, {param: _p(...)}, prepare(kwargs, remote) -> params)
+TOOLS: dict[str, tuple] = {
+    "inspect_workbook": (
+        "inspect", "Inspect workbook", True,
+        "Show a workbook's sheets, values and formulas as a Markdown table (Excel's stored results), with sheet "
+        "sizes, defined names and whether it has macros. Start here for a new workbook.",
+        {"sheet": _p(str | None, "only this sheet"),
+         "max_rows": _p(int, "rows per sheet to show", 100),
+         "max_cols": _p(int, "columns per sheet to show", 26)},
+        None),
+    "find_cells": (
+        "find", "Find cells", True,
+        "Search a workbook for text, numbers or formula fragments, e.g. 'revenue', '0.2' or 'VLOOKUP'. Each match "
+        "comes with its row label and column header, so you can locate the cells to use in other tools without "
+        "reading the whole sheet.",
+        {"query": _p(str, "text, number or regex to look for", REQUIRED),
+         "match": _p(Literal["contains", "exact", "regex"], "how to match text", "contains"),
+         "search_in": _p(Literal["values", "formulas", "both"], "what to search", "both"),
+         "sheet": _p(str | None, "only this sheet"),
+         "limit": _p(int, "maximum matches to return", 50)},
+        None),
+    "explain_cells": (
+        "explain", "Explain cells", True,
+        "For each cell: its formula, the value Excel stored, the value Provenance recomputes, the cells it reads, "
+        "and whether the formula is verified (and why not, if not).",
+        {"cells": _p(list[str], f"cells to explain, each {CELL}", REQUIRED)},
+        None),
+    "trace_cells": (
+        "trace", "Trace precedents and dependents", True,
+        "Follow a cell's formula chain: precedents (what it is calculated from, several levels deep), the input "
+        "cells that ultimately drive it, and dependents (everything that changes when it changes).",
+        {"cells": _p(list[str], f"cells to trace (up to 10), each {CELL}", REQUIRED),
+         "direction": _p(Literal["precedents", "dependents", "both"], "which way to trace", "both"),
+         "depth": _p(int, "levels to follow (1-10)", 3)},
+        None),
+    "recalculate_workbook": (
+        "recalculate", "Recalculate with new inputs", True,
+        "What-if analysis: set input cells to new values and recalculate every formula with Excel's semantics, "
+        'without Excel. Example overrides: {"Budget!B2": 40, "Rates!B1": 0.25}. Returns the requested cells (or '
+        "every cell that changed) with old and new values; cells whose formulas are not verified carry a warning. "
+        "The file is not modified.",
+        {"overrides": _p(dict[str, Any], "input cell -> new value (number, text or true/false)", REQUIRED),
+         "cells": _p(list[str] | None, "cells to report; default: every cell that changed")},
+        None),
+    "goal_seek": (
+        "goal_seek", "Goal seek", True,
+        "Find the value of one input cell that makes a formula cell reach a target, like Excel's Goal Seek: e.g. "
+        "what unit price makes Summary!F12 (profit) equal 10000. Give lower/upper if you know a range that "
+        "contains the answer.",
+        {"target_cell": _p(str, f"the formula cell to drive, {CELL}", REQUIRED),
+         "target_value": _p(float, "the value it should reach", REQUIRED),
+         "changing_cell": _p(str, f"the input cell to change, {CELL}", REQUIRED),
+         "lower": _p(float | None, "lowest value to consider for the changing cell"),
+         "upper": _p(float | None, "highest value to consider for the changing cell"),
+         "tolerance": _p(float, "relative accuracy", 1e-7)},
+        None),
+    "sensitivity_table": (
+        "sensitivity", "Sensitivity table", True,
+        "Vary one input over a list or range of values and tabulate how output cells respond (a data table). "
+        "Add second_input_cell for a two-way table of the first output cell.",
+        {"input_cell": _p(str, f"the input to vary, {CELL}", REQUIRED),
+         "output_cells": _p(list[str], "formula cells to report (up to 10)", REQUIRED),
+         "values": _p(list[Any] | None, "values to try; or use start/stop/steps"),
+         "start": _p(float | None, "first value of an even range"),
+         "stop": _p(float | None, "last value of an even range"),
+         "steps": _p(int, "number of values in the range (2-100)", 11),
+         "second_input_cell": _p(str | None, "a second input for a two-way table"),
+         "second_values": _p(list[Any] | None, "values for the second input"),
+         "second_start": _p(float | None, "first value for the second input"),
+         "second_stop": _p(float | None, "last value for the second input"),
+         "second_steps": _p(int, "number of values for the second input", 11)},
+        None),
+    "compare_workbooks": (
+        "compare", "Compare two workbooks", True,
+        "Compare two versions of a workbook: sheets added or removed, and every cell whose value or formula "
+        "changed, with labels. The first workbook is 'before'; give the second ('after') with the other_ "
+        "parameters.",
+        {"other_file_id": _p(str | None, "'after' workbook: file_id from the upload page (hosted server)"),
+         "other_url": _p(str | None, "'after' workbook: https link"),
+         "other_content_base64": _p(str | None, "'after' workbook: file bytes, base64"),
+         "other_path": _p(str | None, "'after' workbook: local path (local server only)"),
+         "other_filename": _p(str | None, "'after' workbook's file name"),
+         "limit": _p(int, "maximum changed cells to list", 200)},
+        None),
+    "convert_workbook": (
+        "convert", "Convert and certify workbook", False,
+        "Convert a workbook to canonical JSON plus a Python module of its formulas, and certify the conversion: "
+        "structure is proven by rebuilding the file; each formula is replayed against Excel's stored result and "
+        "fuzz-tested against an independent engine. Returns the verdict (verified / partial / failed), counts, "
+        "and why any cells are unverified. include_certificate / include_logic return the full certificate and "
+        "the generated Python.",
+        {"fuzz_cases": _p(int, "random input cases to test against a second engine", 10),
+         "seed": _p(int, "random seed for the fuzz cases", 0),
+         "include_certificate": _p(bool, "return the full certificate JSON", False),
+         "include_logic": _p(bool, "return the generated Python module", False),
+         "output_dir": _p(str | None, "local server only: folder for the artifacts (default <file>.provenance/)")},
+        None),
+}
+
+
+def _prepare(tool: str, kw: dict, src: dict, remote: bool) -> dict:
+    if tool == "convert_workbook":
+        kw["fuzz_cases"] = max(0, min(kw.get("fuzz_cases", 10), 25 if remote else 1000))
+        if remote:
+            kw.pop("output_dir", None)
+        elif kw.get("output_dir") is None and src.get("path"):
+            kw["output_dir"] = str(Path(src["path"]).expanduser()) + ".provenance"
+    if tool == "compare_workbooks":
+        other = {k: kw.pop(f"other_{k}", None) for k in (*SOURCE_KEYS, "filename")}
+        if remote:
+            other.pop("path", None)
+        if not any(other.get(k) for k in SOURCE_KEYS):
+            raise ToolError("give the second workbook as other_file_id, other_url, other_content_base64"
+                            + ("" if remote else " or other_path"))
+        data, name = load_source(other, remote)
+        kw["_other"] = {"b64": base64.b64encode(data).decode(), "name": name}
+    return kw
+
+
 def build_server(remote: bool = False):
     import anyio
     from mcp.server.mcpserver import MCPServer
@@ -459,90 +1056,55 @@ def build_server(remote: bool = False):
     from mcp.types import Icon, ToolAnnotations
 
     server = MCPServer(name="provenance", title="Provenance: verified Excel", version=__version__,
-                       instructions=INSTRUCTIONS, website_url=REPO,
-                       icons=[Icon(src=ICON_URL, mime_type="image/png", sizes=["512x512"])])
-    src_doc = ("The workbook is given as exactly one of: url (https; public link, Google Sheets share links work), "
-               "content_base64 (the file's bytes)" + ("" if remote else ", or path (a local file path)") + ".")
-
-    async def call(op, path, url, content_base64, filename, params):
-        try:
-            data, name = await anyio.to_thread.run_sync(load_source, path, url, content_base64, filename, remote)
-            return await anyio.to_thread.run_sync(run_op, op, data, name, params, remote)
-        except ToolError as exc:
-            raise McpToolError(str(exc)) from None
-
+                       instructions=INSTRUCTIONS + (UPLOAD_HINT.format(url=PUBLIC_URL or "this server") if remote else ""),
+                       website_url=REPO, icons=[Icon(src=ICON_URL, mime_type="image/png", sizes=["512x512"])])
     if remote:
-        async def inspect_workbook(url: str | None = None, content_base64: str | None = None, filename: str | None = None,
-                                   sheet: str | None = None, max_rows: int = 100, max_cols: int = 26) -> dict:
-            return await call("inspect", None, url, content_base64, filename,
-                              {"sheet": sheet, "max_rows": max_rows, "max_cols": max_cols})
-
-        async def convert_workbook(url: str | None = None, content_base64: str | None = None, filename: str | None = None,
-                                   fuzz_cases: int = 10, seed: int = 0, include_certificate: bool = False,
-                                   include_logic: bool = False) -> dict:
-            return await call("convert", None, url, content_base64, filename,
-                              {"fuzz_cases": max(0, min(fuzz_cases, 25)), "seed": seed,
-                               "include_certificate": include_certificate, "include_logic": include_logic})
-
-        async def recalculate_workbook(overrides: dict[str, Any], url: str | None = None,
-                                       content_base64: str | None = None, filename: str | None = None,
-                                       cells: list[str] | None = None) -> dict:
-            return await call("recalculate", None, url, content_base64, filename, {"overrides": overrides, "cells": cells})
-
-        async def explain_cells(cells: list[str], url: str | None = None, content_base64: str | None = None,
-                                filename: str | None = None) -> dict:
-            return await call("explain", None, url, content_base64, filename, {"cells": cells})
+        src_doc = ("Give the workbook as exactly one of: file_id (from the upload page" +
+                   (f", {PUBLIC_URL}/upload" if PUBLIC_URL else "") + "), url (https; Google Sheets share links work) "
+                   "or content_base64 (the file's bytes, small files only).")
+        sources = {"file_id": _p(str | None, "id from the upload page, e.g. pv_..."),
+                   "url": _p(str | None, "https link to the workbook"),
+                   "content_base64": _p(str | None, "the file's bytes, base64 (small files)"),
+                   "filename": _p(str | None, "the file's name, if sending content_base64")}
     else:
-        async def inspect_workbook(path: str | None = None, url: str | None = None, content_base64: str | None = None,
-                                   filename: str | None = None, sheet: str | None = None, max_rows: int = 100,
-                                   max_cols: int = 26) -> dict:
-            return await call("inspect", path, url, content_base64, filename,
-                              {"sheet": sheet, "max_rows": max_rows, "max_cols": max_cols})
+        src_doc = "Give the workbook as exactly one of: path (a local file), url (https) or content_base64."
+        sources = {"path": _p(str | None, "path to a local .xlsx / .xlsm file"),
+                   "url": _p(str | None, "https link to the workbook"),
+                   "content_base64": _p(str | None, "the file's bytes, base64"),
+                   "filename": _p(str | None, "the file's name, if sending content_base64")}
 
-        async def convert_workbook(path: str | None = None, url: str | None = None, content_base64: str | None = None,
-                                   filename: str | None = None, output_dir: str | None = None, fuzz_cases: int = 25,
-                                   seed: int = 0, include_certificate: bool = False, include_logic: bool = False) -> dict:
-            if output_dir is None and path:
-                output_dir = str(Path(path).expanduser()) + ".provenance"
-            return await call("convert", path, url, content_base64, filename,
-                              {"fuzz_cases": max(0, fuzz_cases), "seed": seed, "output_dir": output_dir,
-                               "include_certificate": include_certificate, "include_logic": include_logic})
+    def register(tool: str, spec: tuple) -> None:
+        op, title, read_only_locally, description, own, _ = spec
+        if remote:
+            own = {k: v for k, v in own.items() if k not in ("output_dir", "other_path")}
+        else:
+            own = {k: v for k, v in own.items() if k != "other_file_id"}
+        if tool == "convert_workbook" and not remote:
+            own["fuzz_cases"] = _p(int, "random input cases to test against a second engine", 25)
+        ordered = {**{k: v for k, v in own.items() if v[1] is REQUIRED}, **sources,
+                   **{k: v for k, v in own.items() if v[1] is not REQUIRED}}
+        params = [inspect.Parameter(k, inspect.Parameter.KEYWORD_ONLY, annotation=ann, default=default)
+                  for k, (ann, default) in ordered.items()]
 
-        async def recalculate_workbook(overrides: dict[str, Any], path: str | None = None, url: str | None = None,
-                                       content_base64: str | None = None, filename: str | None = None,
-                                       cells: list[str] | None = None) -> dict:
-            return await call("recalculate", path, url, content_base64, filename, {"overrides": overrides, "cells": cells})
+        async def handler(**kw):
+            try:
+                src = {k: kw.pop(k, None) for k in (*SOURCE_KEYS, "filename")}
+                prepared = await anyio.to_thread.run_sync(_prepare, tool, kw, src, remote)
+                data, name = await anyio.to_thread.run_sync(load_source, src, remote)
+                return await anyio.to_thread.run_sync(run_op, op, data, name, prepared, remote)
+            except ToolError as exc:
+                raise McpToolError(str(exc)) from None
 
-        async def explain_cells(cells: list[str], path: str | None = None, url: str | None = None,
-                                content_base64: str | None = None, filename: str | None = None) -> dict:
-            return await call("explain", path, url, content_base64, filename, {"cells": cells})
+        handler.__signature__ = inspect.Signature(params, return_annotation=dict)
+        handler.__annotations__ = {k: ann for k, (ann, _) in ordered.items()} | {"return": dict}
+        handler.__name__ = tool
+        read_only = remote or read_only_locally
+        server.add_tool(handler, name=tool, title=title, description=f"{description} {src_doc}",
+                        annotations=ToolAnnotations(read_only_hint=read_only, destructive_hint=False,
+                                                    idempotent_hint=True, open_world_hint=True))
 
-    read_only = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
-    server.add_tool(inspect_workbook, name="inspect_workbook", title="Inspect workbook", annotations=read_only,
-                    description="Show a workbook's sheets, values and formulas as a Markdown table (Excel's stored "
-                                "results), with sheet sizes, defined names and whether it has macros. Optional: sheet "
-                                "to show one sheet; max_rows/max_cols to bound the table. " + src_doc)
-    server.add_tool(convert_workbook, name="convert_workbook", title="Convert and certify workbook",
-                    annotations=read_only if remote else ToolAnnotations(
-                        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True),
-                    description="Convert a workbook to canonical JSON plus a Python module of its formulas, and "
-                                "certify the conversion: structure is proven by rebuilding the file; each formula is "
-                                "replayed against Excel's stored result and fuzz-tested against an independent engine. "
-                                "Returns the verdict (verified / partial / failed), counts, and why any cells are "
-                                "unverified. include_certificate / include_logic return the full certificate and the "
-                                "generated Python." + ("" if remote else " With a path, artifacts are written to "
-                                "output_dir (default: <file>.provenance/ beside it).") + " " + src_doc)
-    server.add_tool(recalculate_workbook, name="recalculate_workbook", title="Recalculate with new inputs",
-                    annotations=read_only,
-                    description="What-if analysis: set input cells to new values and recalculate every formula with "
-                                "Excel's semantics, without Excel. overrides maps cell keys to values, e.g. "
-                                '{"Budget!B2": 40, "Rates!B1": 0.25}. Returns the requested cells (or every cell that '
-                                "changed) with old and new values; cells whose formulas are not verified carry a "
-                                "warning. The original file is not modified. " + src_doc)
-    server.add_tool(explain_cells, name="explain_cells", title="Explain cells", annotations=read_only,
-                    description="For each cell key (e.g. 'Budget!D6'): its formula, the value Excel stored, the value "
-                                "Provenance recomputes, the cells it reads, and whether the formula is verified (and "
-                                "why not, if not). " + src_doc)
+    for tool, spec in TOOLS.items():
+        register(tool, spec)
     return server
 
 
@@ -552,15 +1114,17 @@ ICON_URL = "https://raw.githubusercontent.com/slimboi34/provenance/main/docs/ico
 
 PRIVACY = f"""\
 <h1>Provenance MCP server: privacy policy</h1>
-<p><em>Effective 2026-10-09. Applies to the hosted server at this address and to the local
+<p><em>Effective 2026-10-10. Applies to the hosted server at this address and to the local
 <code>provenance-mcp</code> program.</em></p>
 <h2>What is collected</h2>
 <p>Only what a tool call contains: the workbook you send (as file contents or a URL to fetch) and the tool's
 parameters, such as cell values for a recalculation. No account, name, email address or cookie is involved.</p>
 <h2>How it is used and stored</h2>
-<p>Each workbook is used only to answer the call that sent it. On the hosted server it is written to a temporary
+<p>Each workbook is used only to answer the calls that use it. On the hosted server it is written to a temporary
 folder, processed in a separate short-lived process, and deleted when the call finishes, normally within seconds.
-Nothing from the file is kept: no copies, no database, no cache across calls. Request logs record time, status and
+A file you put on the upload page is kept for at most one hour so that Claude can use it by its file id, then deleted;
+it is never shown or sent back to anyone, and the file id (a random 32-character code) is the only way to use it.
+Nothing else from a file is kept: no copies, no database, no cache across calls. Request logs record time, status and
 duration, never file contents, URLs you send or cell values. The local program runs entirely on your computer and
 only writes files to the output folder you choose.</p>
 <h2>Third parties</h2>
@@ -568,7 +1132,7 @@ only writes files to the output folder you choose.</p>
 URL from its owner (for example Google Sheets), which sees an ordinary download request. The hosted server runs on
 Railway (railway.com), which provides the machine and network.</p>
 <h2>Retention</h2>
-<p>Workbook data: deleted at the end of each call. Request logs without content: kept by the hosting provider for
+<p>Workbook data: deleted at the end of each call; uploaded files, within one hour. Request logs without content: kept by the hosting provider for
 up to 30 days.</p>
 <h2>Contact</h2>
 <p>Questions or deletion requests: <a href="{CONTACT}">{CONTACT}</a>.</p>
@@ -586,21 +1150,61 @@ answers are verified. A formula Provenance does not fully model is reported as u
 <h2>Tools</h2>
 <ul>
 <li><b>inspect_workbook</b>: sheets, values and formulas as a table.</li>
+<li><b>find_cells</b>: find text, numbers or formulas, with row and column labels.</li>
+<li><b>explain_cells</b>: a cell's formula, stored and recomputed values, inputs, and whether it is verified.</li>
+<li><b>trace_cells</b>: precedents, dependents, and the inputs that ultimately drive a result.</li>
+<li><b>recalculate_workbook</b>: what-if: change input cells, get every affected result.</li>
+<li><b>goal_seek</b>: find the input value that makes a result hit a target.</li>
+<li><b>sensitivity_table</b>: one- or two-way data tables over input ranges.</li>
+<li><b>compare_workbooks</b>: every changed value, formula and sheet between two versions.</li>
 <li><b>convert_workbook</b>: canonical JSON + Python for every formula, with a certificate (verified / partial /
 failed) of what was proven.</li>
-<li><b>recalculate_workbook</b>: what-if: change input cells, get every affected result.</li>
-<li><b>explain_cells</b>: a cell's formula, stored and recomputed values, the cells it reads, and its status.</li>
 </ul>
-<p>Send the workbook as a public https link (Google Sheets share links work) or as file contents. The hosted
-server handles typical workbooks (up to about 1 MB compressed); use the local version for larger files.</p>
+<h2>Giving Claude a workbook</h2>
+<p><b><a href="/upload">Upload it here</a></b> and paste the file id into your chat, or share a public https link
+(Google Sheets share links work). The hosted server handles typical workbooks (up to about 1 MB compressed); use
+the local version for larger files.</p>
 <h2>Examples</h2>
 <ol>
 <li>"Here's our pricing model: https://&hellip;/pricing.xlsx. What does the total come to if units go to 500?"</li>
-<li>"Explain how cell Summary!F12 in this workbook is calculated, and is it verified?"</li>
-<li>"Convert this spreadsheet and tell me whether every formula reproduces Excel's results."</li>
+<li>"In file pv_&hellip;, what price per unit gets profit to 10,000?"</li>
+<li>"Show me how margin changes as the discount goes from 0% to 30%."</li>
+<li>"What changed between last month's forecast and this one?"</li>
+<li>"Explain how Summary!F12 is calculated, and is it verified?"</li>
 </ol>
 <p><a href="/privacy">Privacy policy</a> &middot; <a href="{REPO}">Source and documentation</a> &middot;
 <a href="{CONTACT}">Support</a></p>
+"""
+
+
+UPLOAD_PAGE = """\
+<img src="/icon.png" width=56 height=56 alt="">
+<h1>Give Claude a workbook</h1>
+<p>Drop an .xlsx or .xlsm file here. You get a file id to paste into your Claude chat; the file is deleted after one
+hour and is never shown to anyone. <a href="/privacy">Privacy</a></p>
+<label id=drop style="display:block;border:2px dashed #9cc7b2;border-radius:14px;padding:2.5rem;text-align:center;
+cursor:pointer;background:#f6fbf8">Drop a workbook, or click to choose one
+<input id=file type=file accept=".xlsx,.xlsm" hidden></label>
+<div id=out style="margin-top:1.5rem"></div>
+<script>
+const drop = document.getElementById('drop'), input = document.getElementById('file'), out = document.getElementById('out');
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function send(f) {
+  out.textContent = 'Uploading ' + f.name + '...';
+  const r = await fetch('/upload?name=' + encodeURIComponent(f.name), {method: 'POST', body: f});
+  const j = await r.json();
+  if (!r.ok) { out.innerHTML = '<p style="color:#b42318">' + esc(j.error || 'Upload failed') + '</p>'; return; }
+  const line = 'Use Provenance on my workbook ' + j.name + ', file_id ' + j.file_id;
+  out.innerHTML = '<p>Uploaded <b>' + esc(j.name) + '</b>. Paste this into Claude (valid for 1 hour):</p>' +
+    '<p><code id=line style="display:block;padding:.8rem;word-break:break-all">' + esc(line) + '</code></p>' +
+    '<button id=copy style="padding:.5rem 1rem;border-radius:8px;border:0;background:#0f5132;color:#fff;cursor:pointer">Copy</button>';
+  document.getElementById('copy').onclick = () => { navigator.clipboard.writeText(line); document.getElementById('copy').textContent = 'Copied'; };
+}
+input.onchange = () => input.files[0] && send(input.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.style.background = '#e3f3ea'; };
+drop.ondragleave = () => drop.style.background = '#f6fbf8';
+drop.ondrop = e => { e.preventDefault(); drop.style.background = '#f6fbf8'; e.dataTransfer.files[0] && send(e.dataTransfer.files[0]); };
+</script>
 """
 
 
@@ -612,6 +1216,7 @@ def _page(body: str) -> str:
 
 
 def _add_pages(server) -> None:
+    import anyio
     from starlette.responses import HTMLResponse, JSONResponse, Response
 
     @server.custom_route("/", methods=["GET"])
@@ -627,6 +1232,35 @@ def _add_pages(server) -> None:
     async def icon(request):
         return Response((Path(__file__).parent / "static" / "icon.png").read_bytes(), media_type="image/png",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+    @server.custom_route("/upload", methods=["GET"])
+    async def upload_page(request):
+        return HTMLResponse(_page(UPLOAD_PAGE))
+
+    @server.custom_route("/upload", methods=["POST", "PUT"])
+    async def upload(request):
+        client = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0]
+        now = time.time()
+        recent = [t for t in _UPLOAD_TIMES.get(client, []) if t > now - 3600]
+        if len(recent) >= UPLOADS_PER_HOUR:
+            return JSONResponse({"error": "too many uploads from your address; try again later"}, status_code=429)
+        _UPLOAD_TIMES[client] = recent + [now]
+        if len(_UPLOAD_TIMES) > 10000:
+            _UPLOAD_TIMES.clear()
+        if int(request.headers.get("content-length") or 0) > MAX_BYTES:
+            return JSONResponse({"error": f"file is larger than {MAX_BYTES >> 20} MB"}, status_code=413)
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_BYTES:
+                return JSONResponse({"error": f"file is larger than {MAX_BYTES >> 20} MB"}, status_code=413)
+            chunks.append(chunk)
+        name = request.query_params.get("name") or "workbook.xlsx"
+        try:
+            file_id = await anyio.to_thread.run_sync(store_upload, b"".join(chunks), name)
+        except ToolError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"file_id": file_id, "name": Path(name).name, "expires_in_seconds": UPLOAD_TTL})
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request):

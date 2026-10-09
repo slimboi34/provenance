@@ -85,15 +85,22 @@ values["Budget!D6"]
 `provenance-mcp` is an MCP server, so Claude can read workbooks exactly,
 recalculate them with new inputs, and tell you which answers are verified.
 
-| Tool | Does | Changes anything? |
-|---|---|---|
-| `inspect_workbook` | Sheets, values and formulas as a Markdown table | No |
-| `convert_workbook` | Full conversion + certificate (verified / partial / failed) | Locally, writes artifacts to `output_dir` |
-| `recalculate_workbook` | What-if: `{"Budget!B2": 40}` → every affected cell, old and new | No |
-| `explain_cells` | A cell's formula, stored vs recomputed value, inputs, status | No |
+| Tool | Does |
+|---|---|
+| `inspect_workbook` | Sheets, values and formulas as a Markdown table |
+| `find_cells` | Find text, numbers or formula fragments, each with its row label and column header |
+| `explain_cells` | A cell's formula, stored vs recomputed value, inputs, verification status |
+| `trace_cells` | Precedents and dependents several levels deep, and the inputs that drive a result |
+| `recalculate_workbook` | What-if: `{"Budget!B2": 40}` → every affected cell, old and new |
+| `goal_seek` | The input value that makes a formula cell reach a target |
+| `sensitivity_table` | One- or two-way data tables over input values or ranges |
+| `compare_workbooks` | Every changed value, formula and sheet between two versions |
+| `convert_workbook` | Full conversion + certificate (verified / partial / failed); locally, writes artifacts to `output_dir` |
 
-Each tool takes the workbook as one of `path` (local only), `url` (https;
-Google Sheets share links are exported as .xlsx) or `content_base64`.
+All tools are read-only except `convert_workbook` on the local server, which writes files.
+Each takes the workbook as one of `path` (local only), `file_id` (hosted only, from the
+upload page), `url` (https; Google Sheets share links are exported as .xlsx) or
+`content_base64`.
 
 **Local** (Claude Code, Claude Desktop; reads files on your machine):
 
@@ -104,29 +111,35 @@ provenance-mcp --config      # JSON snippet for claude_desktop_config.json
 ```
 
 **Hosted** (claude.ai custom connector; no sign-in):
-`provenance-mcp --http` serves MCP at `/mcp`, plus `/` (docs), `/privacy`
-and `/health`. In this mode the server never reads its own disk for a caller,
+`provenance-mcp --http` serves MCP at `/mcp`, plus `/` (docs), `/upload`,
+`/privacy` and `/health`. `/upload` lets a person drop a workbook and paste the
+returned `file_id` into Claude; uploads are never served back and are deleted
+after an hour (30 uploads per hour per address, 300 MB stored at most). In this mode the server never reads its own disk for a caller,
 refuses URLs that resolve to private addresses, caps files at 25 MB, and runs
 each call in a separate process limited to 120 s and 2 GB, at most 2 at once
-(`PROVENANCE_MCP_TIMEOUT`, `PROVENANCE_MCP_MEMORY_MB`, `PROVENANCE_MCP_WORKERS`).
+(`PROVENANCE_MCP_TIMEOUT`, `PROVENANCE_MCP_MEMORY_MB`, `PROVENANCE_MCP_WORKERS`;
+uploads: `PROVENANCE_UPLOAD_DIR`, `PROVENANCE_UPLOAD_STORE_MB`, `PROVENANCE_UPLOADS_PER_HOUR`).
 Deploy with the `Dockerfile` (Railway: `railway up`).
 
 Live: **https://mcp-production-5fd2.up.railway.app/mcp** (runs with 90 s and
-1 GB per call). Conversion holds the whole file as a tree in memory, roughly
+1 GB per call, one call at a time). Conversion holds the whole file as a tree in memory, roughly
 1 GB per MB of compressed workbook, so files over about 1 MB can exceed the
 hosted limit; Claude is then told to use the local server, which has no cap.
 
 Example prompts:
 
 1. "Here's our pricing model: https://…/pricing.xlsx. What's the total if units go to 500?"
-2. "How is Summary!F12 calculated in this workbook, and is it verified?"
-3. "Convert this spreadsheet and tell me whether every formula reproduces Excel's results."
+2. "In file pv_…, what price per unit gets profit to 10,000?"
+3. "Show me how margin changes as the discount goes from 0% to 30%."
+4. "What changed between last month's forecast and this one?"
+5. "How is Summary!F12 calculated, and is it verified?"
 
 ## Privacy policy
 
 The MCP server only processes the workbook and parameters in each tool call.
 On the hosted server the file is held in a temporary folder for the length of
-the call and then deleted. Nothing is stored, cached across calls, sold,
+the call and then deleted; a file put on the upload page is kept for at most
+one hour, is never served back, and can only be used with its random file id. Nothing is stored, cached across calls, sold,
 shared, or used for training, and logs never contain file contents. If you
 give a URL, the server downloads it from its owner. Hosting is Railway.
 Request logs without content are kept for up to 30 days. Contact: GitHub

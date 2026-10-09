@@ -2,10 +2,13 @@
 
 import base64
 import json
+import os
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 import anyio
 import pytest
@@ -17,7 +20,8 @@ from mcp.client.stdio import StdioServerParameters  # noqa: E402
 
 from provenance import mcp_server as m  # noqa: E402
 
-TOOLS = {"inspect_workbook", "convert_workbook", "recalculate_workbook", "explain_cells"}
+TOOLS = {"inspect_workbook", "convert_workbook", "recalculate_workbook", "explain_cells", "find_cells",
+         "trace_cells", "goal_seek", "sensitivity_table", "compare_workbooks"}
 
 
 def _payload(result):
@@ -31,7 +35,10 @@ async def _exercise(client, source: dict, remote: bool):
     for tool in tools.values():
         assert tool.title and tool.annotations is not None
         assert tool.annotations.read_only_hint is not None or tool.annotations.destructive_hint is not None
-    assert ("path" in tools["inspect_workbook"].input_schema["properties"]) is not remote
+    for tool in tools.values():
+        props = tool.input_schema["properties"]
+        assert ("path" in props) is not remote and ("file_id" in props) is remote
+        assert all(p.get("description") for p in props.values()), tool.name
 
     inspected = _payload(await client.call_tool("inspect_workbook", source))
     assert [s["name"] for s in inspected["sheets"]] == ["Budget", "Rates"]
@@ -47,6 +54,28 @@ async def _exercise(client, source: dict, remote: bool):
 
     converted = _payload(await client.call_tool("convert_workbook", {**source, "fuzz_cases": 0}))
     assert converted["verdict"] == "verified" and converted["structure"] == "proven"
+
+    found = _payload(await client.call_tool("find_cells", {**source, "query": "sum"}))
+    first = found["results"][0]
+    assert (first["cell"], first["value"]) == ("Budget!A6", "Sum")
+
+    traced = _payload(await client.call_tool("trace_cells", {**source, "cells": ["Budget!D12"], "depth": 5}))
+    assert "Rates!B1" in traced["results"][0]["driving_inputs"]
+    assert "Budget!D2:D4" in traced["results"][0]["driving_inputs"] or "Budget!B2" in traced["results"][0]["driving_inputs"]
+
+    sought = _payload(await client.call_tool("goal_seek", {**source, "target_cell": "Budget!D6", "target_value": 100,
+                                                            "changing_cell": "Budget!B2"}))
+    assert sought["solution"] == pytest.approx(35.2) and sought["achieved_value"] == pytest.approx(100)
+
+    table = _payload(await client.call_tool("sensitivity_table", {**source, "input_cell": "Rates!B1", "start": 0,
+                                                                   "stop": 0.3, "steps": 4,
+                                                                   "output_cells": ["Budget!D12"]}))
+    assert [r["Budget!D12"] for r in table["rows"]] == [0.0, 2.2, 4.4, 6.6]
+
+    other = "other_path" if "path" in source else "other_content_base64"
+    same = source.get("path") or source.get("content_base64")
+    compared = _payload(await client.call_tool("compare_workbooks", {**source, other: same}))
+    assert sum(compared["counts"].values()) == 0
 
     bad = await client.call_tool("recalculate_workbook", {**source, "overrides": {"Budget!D6": 1}})
     assert bad.is_error and "holds a formula" in bad.content[0].text
@@ -73,10 +102,11 @@ def _free_port():
         return s.getsockname()[1]
 
 
-def test_http_server(budget):
+def test_http_server(budget, tmp_path):
     port = _free_port()
+    env = {**os.environ, "PROVENANCE_UPLOAD_DIR": str(tmp_path / "uploads")}
     proc = subprocess.Popen([sys.executable, "-m", "provenance.mcp_server", "--http", "--host", "127.0.0.1",
-                             "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             "--port", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     try:
         for _ in range(100):
             try:
@@ -89,6 +119,14 @@ def test_http_server(budget):
             async with Client(f"http://127.0.0.1:{port}/mcp") as client:
                 await _exercise(client, {"content_base64": base64.b64encode(budget).decode(),
                                          "filename": "budget.xlsx"}, remote=True)
+                # The upload page flow: POST the file, then use its file_id.
+                request = urllib.request.Request(f"http://127.0.0.1:{port}/upload?name=budget.xlsx", data=budget,
+                                                 method="POST")
+                file_id = json.loads(urllib.request.urlopen(request).read())["file_id"]
+                inspected = _payload(await client.call_tool("inspect_workbook", {"file_id": file_id}))
+                assert inspected["file"] == "budget.xlsx"
+                gone = await client.call_tool("inspect_workbook", {"file_id": "pv_" + "x" * 32})
+                assert gone.is_error and "expired" in gone.content[0].text
 
         anyio.run(run)
     finally:
@@ -106,7 +144,34 @@ def test_hosted_mode_refuses_local_files_and_private_urls():
         ({}, "exactly one"),
     ]:
         with pytest.raises(m.ToolError, match=message):
-            m.load_source(kwargs.get("path"), kwargs.get("url"), kwargs.get("content_base64"), None, remote=True)
+            m.load_source(kwargs, remote=True)
+
+
+def test_upload_store(tmp_path, monkeypatch, budget):
+    monkeypatch.setattr(m, "UPLOADS", tmp_path)
+    file_id = m.store_upload(budget, "../../etc/q3.xlsx")
+    assert m.FILE_ID.match(file_id)
+    assert m.load_upload(file_id) == (budget, "q3.xlsx")
+    with pytest.raises(m.ToolError, match="not an Excel workbook"):
+        m.store_upload(b"hello", "x.xlsx")
+    for bad in ("../" + file_id, "pv_short", file_id + "/x"):
+        with pytest.raises(m.ToolError, match="unknown or has expired"):
+            m.load_upload(bad)
+    old = time.time() - m.UPLOAD_TTL - 5
+    os.utime(tmp_path / file_id, (old, old))
+    with pytest.raises(m.ToolError, match="expired"):
+        m.load_upload(file_id)
+    m._sweep_uploads()
+    assert not (tmp_path / file_id).exists()
+
+
+def test_goal_seek_brackets_and_reports_no_solution(budget):
+    with pytest.raises(m.ToolError, match="no value"):  # D13 is IFERROR(D6/B4,-1) and B4 = 0: C3 can't move it
+        m.run_op("goal_seek", budget, "b.xlsx", {"target_cell": "Budget!D13", "target_value": -5,
+                                                  "changing_cell": "Budget!C3", "lower": None, "upper": None}, False)
+    r = m.run_op("goal_seek", budget, "b.xlsx", {"target_cell": "Budget!D9", "target_value": 2,
+                                                  "changing_cell": "Budget!B4", "lower": 0, "upper": 10}, False)
+    assert (22 + 99.99 * r["solution"]) / (14 + r["solution"]) == pytest.approx(2)
 
 
 def test_google_sheets_links_export_as_xlsx():
