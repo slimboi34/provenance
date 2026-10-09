@@ -443,7 +443,7 @@ def _worker() -> int:
         reply = {"error": str(exc)}
     except MemoryError:
         reply = {"error": f"this workbook needs more than the hosted server's {WORKER_MEMORY >> 20} MB of memory to "
-                          "convert; run Provenance locally (pip install \"provenance-proxy[mcp]\") for large files"}
+                          "convert; run Provenance locally (pip install \"provenance-proxy[mcp] @ git+https://github.com/slimboi34/provenance\") for large files"}
     except Exception as exc:  # noqa: BLE001 - reported to the caller, never a traceback
         reply = {"error": f"processing failed: {type(exc).__name__}: {exc}"}
     sys.stdout.write(json.dumps(reply, ensure_ascii=False, default=repr))
@@ -581,7 +581,7 @@ HOME = f"""\
 answers are verified. A formula Provenance does not fully model is reported as unverified, never guessed.</p>
 <h2>Connect</h2>
 <p>In Claude: Settings &rarr; Connectors &rarr; Add custom connector, URL <code>{{url}}</code>. No sign-in.</p>
-<p>Locally (reads files on your computer): <code>pip install "provenance-proxy[mcp]"</code>, then
+<p>Locally (reads files on your computer): <code>pip install "provenance-proxy[mcp] @ git+https://github.com/slimboi34/provenance"</code>, then
 <code>claude mcp add provenance -- provenance-mcp</code>.</p>
 <h2>Tools</h2>
 <ul>

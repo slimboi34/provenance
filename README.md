@@ -98,7 +98,7 @@ Google Sheets share links are exported as .xlsx) or `content_base64`.
 **Local** (Claude Code, Claude Desktop; reads files on your machine):
 
 ```
-pip install "provenance-proxy[mcp]"
+pip install "provenance-proxy[mcp] @ git+https://github.com/slimboi34/provenance"
 claude mcp add provenance -- provenance-mcp
 provenance-mcp --config      # JSON snippet for claude_desktop_config.json
 ```
