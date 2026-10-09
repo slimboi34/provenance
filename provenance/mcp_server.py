@@ -619,7 +619,11 @@ def op_trace(data: bytes, name: str, p: dict) -> dict:
                 seen.add(r)
                 inner = g.formula_cells_in(r)
                 stack.extend(inner)
-                if ":" in r or r not in g.deps:
+                if ":" in r:
+                    _, r1, c1, r2, c2 = _parse_range(r)
+                    if len(inner) < (r2 - r1 + 1) * (c2 - c1 + 1):  # holds inputs, not only formulas
+                        inputs.add(r)
+                elif r not in g.deps:
                     inputs.add(r)
         return sorted(inputs)[:200]
 

@@ -60,8 +60,8 @@ async def _exercise(client, source: dict, remote: bool):
     assert (first["cell"], first["value"]) == ("Budget!A6", "Sum")
 
     traced = _payload(await client.call_tool("trace_cells", {**source, "cells": ["Budget!D12"], "depth": 5}))
-    assert "Rates!B1" in traced["results"][0]["driving_inputs"]
-    assert "Budget!D2:D4" in traced["results"][0]["driving_inputs"] or "Budget!B2" in traced["results"][0]["driving_inputs"]
+    assert traced["results"][0]["driving_inputs"] == ["Budget!B2", "Budget!B3", "Budget!B4", "Budget!C2", "Budget!C3",
+                                                      "Budget!C4", "Rates!B1"]  # not D2:D4: formulas only
 
     sought = _payload(await client.call_tool("goal_seek", {**source, "target_cell": "Budget!D6", "target_value": 100,
                                                             "changing_cell": "Budget!B2"}))
