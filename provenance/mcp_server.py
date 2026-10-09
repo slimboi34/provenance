@@ -442,10 +442,11 @@ def build_server(remote: bool = False):
     import anyio
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError as McpToolError
-    from mcp.types import ToolAnnotations
+    from mcp.types import Icon, ToolAnnotations
 
     server = MCPServer(name="provenance", title="Provenance: verified Excel", version=__version__,
-                       instructions=INSTRUCTIONS, website_url="https://github.com/slimboi34/provenance")
+                       instructions=INSTRUCTIONS, website_url=REPO,
+                       icons=[Icon(src=ICON_URL, mime_type="image/png", sizes=["512x512"])])
     src_doc = ("The workbook is given as exactly one of: url (https; public link, Google Sheets share links work), "
                "content_base64 (the file's bytes)" + ("" if remote else ", or path (a local file path)") + ".")
 
@@ -533,6 +534,7 @@ def build_server(remote: bool = False):
 
 REPO = "https://github.com/slimboi34/provenance"
 CONTACT = os.environ.get("PROVENANCE_CONTACT", f"{REPO}/issues")
+ICON_URL = "https://raw.githubusercontent.com/slimboi34/provenance/main/docs/icon.png"
 
 PRIVACY = f"""\
 <h1>Provenance MCP server: privacy policy</h1>
@@ -559,6 +561,7 @@ up to 30 days.</p>
 """
 
 HOME = f"""\
+<img src="/icon.png" width=72 height=72 alt="">
 <h1>Provenance: verified Excel for Claude</h1>
 <p>An MCP server that lets Claude read Excel workbooks exactly, recalculate them with new inputs, and say which
 answers are verified. A formula Provenance does not fully model is reported as unverified, never guessed.</p>
@@ -595,7 +598,7 @@ def _page(body: str) -> str:
 
 
 def _add_pages(server) -> None:
-    from starlette.responses import HTMLResponse, JSONResponse
+    from starlette.responses import HTMLResponse, JSONResponse, Response
 
     @server.custom_route("/", methods=["GET"])
     async def home(request):
@@ -605,6 +608,11 @@ def _add_pages(server) -> None:
     @server.custom_route("/privacy", methods=["GET"])
     async def privacy(request):
         return HTMLResponse(_page(PRIVACY))
+
+    @server.custom_route("/icon.png", methods=["GET"])
+    async def icon(request):
+        return Response((Path(__file__).parent / "static" / "icon.png").read_bytes(), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request):
