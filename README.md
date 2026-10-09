@@ -107,9 +107,14 @@ provenance-mcp --config      # JSON snippet for claude_desktop_config.json
 `provenance-mcp --http` serves MCP at `/mcp`, plus `/` (docs), `/privacy`
 and `/health`. In this mode the server never reads its own disk for a caller,
 refuses URLs that resolve to private addresses, caps files at 25 MB, and runs
-each call in a separate process limited to 120 s and 2 GB
-(`PROVENANCE_MCP_TIMEOUT`, `PROVENANCE_MCP_MEMORY_MB`). Deploy with the
-`Dockerfile` (Railway: `railway up`).
+each call in a separate process limited to 120 s and 2 GB, at most 2 at once
+(`PROVENANCE_MCP_TIMEOUT`, `PROVENANCE_MCP_MEMORY_MB`, `PROVENANCE_MCP_WORKERS`).
+Deploy with the `Dockerfile` (Railway: `railway up`).
+
+Live: **https://mcp-production-5fd2.up.railway.app/mcp** (runs with 90 s and
+1 GB per call). Conversion holds the whole file as a tree in memory, roughly
+1 GB per MB of compressed workbook, so files over about 1 MB can exceed the
+hosted limit; Claude is then told to use the local server, which has no cap.
 
 Example prompts:
 

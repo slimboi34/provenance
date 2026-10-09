@@ -29,6 +29,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +44,7 @@ MAX_BYTES = 25 * 1024 * 1024
 FETCH_TIMEOUT = 30
 WORKER_TIMEOUT = int(os.environ.get("PROVENANCE_MCP_TIMEOUT", "120"))
 WORKER_MEMORY = int(os.environ.get("PROVENANCE_MCP_MEMORY_MB", "2048")) << 20
+WORKER_SLOTS = threading.BoundedSemaphore(int(os.environ.get("PROVENANCE_MCP_WORKERS", "2")))
 MAX_CELLS_RETURNED = 500
 SUFFIXES = (".xlsx", ".xlsm", ".docx")
 CELL_KEY = re.compile(r"^(?:'(?:[^']|'')+'|[^!'\s][^!]*)!\$?[A-Za-z]{1,3}\$?[0-9]{1,7}$")
@@ -402,15 +404,24 @@ def run_op(op: str, data: bytes, name: str, params: dict, isolate: bool) -> dict
     if not isolate:
         return OPS[op](data, name, params)
     request = json.dumps({"op": op, "name": name, "params": params, "data": base64.b64encode(data).decode()})
+    # One math thread: per-core thread pools reserve address space and would trip the memory limit on big hosts.
+    env = {**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+           "MALLOC_ARENA_MAX": "2"}
     try:
-        proc = subprocess.run([sys.executable, "-m", "provenance.mcp_server", "--worker"], input=request.encode(),
-                              capture_output=True, timeout=WORKER_TIMEOUT,
-                              preexec_fn=_limit_memory if os.name == "posix" else None)
+        with WORKER_SLOTS:  # bounds total memory: at most N conversions at once, the rest queue
+            proc = subprocess.run([sys.executable, "-m", "provenance.mcp_server", "--worker"], input=request.encode(),
+                                  capture_output=True, timeout=WORKER_TIMEOUT, env=env,
+                                  preexec_fn=_limit_memory if os.name == "posix" else None)
     except subprocess.TimeoutExpired:
         raise ToolError(f"the workbook took longer than {WORKER_TIMEOUT}s to process") from None
     try:
         reply = json.loads(proc.stdout)
     except json.JSONDecodeError:
+        if proc.returncode < 0 or proc.returncode == 137:
+            raise ToolError("the workbook used too much memory on the hosted server; run Provenance locally "
+                            "for large files") from None
+        last = proc.stderr.decode(errors="replace").strip().splitlines()[-1:] or [""]
+        print(f"worker {op} exited {proc.returncode}: {last[0][:300]}", file=sys.stderr)  # no file contents
         raise ToolError("the workbook could not be processed (it may be too large or complex)") from None
     if "error" in reply:
         raise ToolError(reply["error"])
@@ -430,6 +441,9 @@ def _worker() -> int:
         reply = {"result": result}
     except ToolError as exc:
         reply = {"error": str(exc)}
+    except MemoryError:
+        reply = {"error": f"this workbook needs more than the hosted server's {WORKER_MEMORY >> 20} MB of memory to "
+                          "convert; run Provenance locally (pip install \"provenance-proxy[mcp]\") for large files"}
     except Exception as exc:  # noqa: BLE001 - reported to the caller, never a traceback
         reply = {"error": f"processing failed: {type(exc).__name__}: {exc}"}
     sys.stdout.write(json.dumps(reply, ensure_ascii=False, default=repr))
@@ -577,8 +591,8 @@ failed) of what was proven.</li>
 <li><b>recalculate_workbook</b>: what-if: change input cells, get every affected result.</li>
 <li><b>explain_cells</b>: a cell's formula, stored and recomputed values, the cells it reads, and its status.</li>
 </ul>
-<p>Send the workbook as a public https link (Google Sheets share links work) or as file contents. Files up to
-{MAX_BYTES >> 20} MB.</p>
+<p>Send the workbook as a public https link (Google Sheets share links work) or as file contents. The hosted
+server handles typical workbooks (up to about 1 MB compressed); use the local version for larger files.</p>
 <h2>Examples</h2>
 <ol>
 <li>"Here's our pricing model: https://&hellip;/pricing.xlsx. What does the total come to if units go to 500?"</li>
