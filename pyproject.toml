@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "provenance-proxy"
+version = "0.1.0"
+description = "Verified conversion of Excel workbooks to canonical JSON and Python, with a certificate of what was proven."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["lxml>=5"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=2"]
+dev = ["pytest", "openpyxl", "mcp>=2"]
+
+[project.scripts]
+provenance = "provenance.cli:main"
+provenance-mcp = "provenance.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["provenance*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

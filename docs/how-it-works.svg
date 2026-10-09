@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1f2937" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="760" fill="#f7f8fa"/>
+
+  <text x="600" y="58" text-anchor="middle" font-size="30" font-weight="700" fill="#111827">How Provenance works</text>
+  <text x="600" y="90" text-anchor="middle" font-size="16" fill="#5b6472">Convert a spreadsheet, prove nothing was lost, and certify exactly what was checked</text>
+
+  <!-- 1. Input -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="150" width="220" height="190" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  </g>
+  <rect x="40" y="150" width="220" height="44" rx="14" fill="#1d6f42"/>
+  <rect x="40" y="180" width="220" height="14" fill="#1d6f42"/>
+  <text x="150" y="178" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">1 · Excel file</text>
+  <text x="150" y="228" text-anchor="middle" font-size="15" fill="#374151">.xlsx / .xlsm</text>
+  <text x="150" y="256" text-anchor="middle" font-size="14" fill="#5b6472">data, formulas,</text>
+  <text x="150" y="276" text-anchor="middle" font-size="14" fill="#5b6472">styles, macros</text>
+  <text x="150" y="306" text-anchor="middle" font-size="14" fill="#5b6472">+ answers Excel saved</text>
+
+  <!-- 2. Convert -->
+  <g filter="url(#shadow)">
+    <rect x="330" y="130" width="250" height="230" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  </g>
+  <rect x="330" y="130" width="250" height="44" rx="14" fill="#2563eb"/>
+  <rect x="330" y="160" width="250" height="14" fill="#2563eb"/>
+  <text x="455" y="158" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">2 · Convert</text>
+  <rect x="352" y="192" width="206" height="44" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="455" y="219" text-anchor="middle" font-size="14" fill="#1e3a8a">JSON copy of the whole file</text>
+  <rect x="352" y="246" width="206" height="44" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="455" y="273" text-anchor="middle" font-size="14" fill="#1e3a8a">Readable text view</text>
+  <rect x="352" y="300" width="206" height="44" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="455" y="327" text-anchor="middle" font-size="14" fill="#1e3a8a">Formulas as Python code</text>
+
+  <!-- 3. Prove -->
+  <g filter="url(#shadow)">
+    <rect x="650" y="130" width="250" height="230" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  </g>
+  <rect x="650" y="130" width="250" height="44" rx="14" fill="#7c3aed"/>
+  <rect x="650" y="160" width="250" height="14" fill="#7c3aed"/>
+  <text x="775" y="158" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">3 · Prove</text>
+  <text x="672" y="206" font-size="14" font-weight="700" fill="#4c1d95">Nothing lost</text>
+  <text x="672" y="226" font-size="13" fill="#374151">Rebuild the file from the JSON;</text>
+  <text x="672" y="244" font-size="13" fill="#374151">every piece must match exactly</text>
+  <text x="672" y="276" font-size="14" font-weight="700" fill="#4c1d95">Same answers</text>
+  <text x="672" y="296" font-size="13" fill="#374151">Each Python formula must give</text>
+  <text x="672" y="314" font-size="13" fill="#374151">Excel's saved answer, then pass</text>
+  <text x="672" y="332" font-size="13" fill="#374151">random tests vs a 2nd engine</text>
+
+  <!-- 4. Certificate -->
+  <g filter="url(#shadow)">
+    <rect x="970" y="150" width="200" height="190" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  </g>
+  <rect x="970" y="150" width="200" height="44" rx="14" fill="#b45309"/>
+  <rect x="970" y="180" width="200" height="14" fill="#b45309"/>
+  <text x="1070" y="178" text-anchor="middle" font-size="17" font-weight="700" fill="#ffffff">4 · Certificate</text>
+  <circle cx="996" cy="225" r="7" fill="#16a34a"/>
+  <text x="1012" y="230" font-size="14" fill="#374151">Proven</text>
+  <circle cx="996" cy="257" r="7" fill="#2563eb"/>
+  <text x="1012" y="262" font-size="14" fill="#374151">Tested</text>
+  <circle cx="996" cy="289" r="7" fill="#9ca3af"/>
+  <text x="1012" y="294" font-size="14" fill="#374151">Not verified</text>
+  <text x="1070" y="324" text-anchor="middle" font-size="12" fill="#5b6472">signed, re-checkable later</text>
+
+  <!-- Arrows -->
+  <line x1="262" y1="245" x2="324" y2="245" stroke="#5b6472" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="582" y1="245" x2="644" y2="245" stroke="#5b6472" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <line x1="902" y1="245" x2="964" y2="245" stroke="#5b6472" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Never guess band -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="410" width="1130" height="110" rx="14" fill="#ffffff" stroke="#d1d5db"/>
+  </g>
+  <rect x="40" y="410" width="10" height="110" rx="4" fill="#dc2626"/>
+  <text x="76" y="452" font-size="19" font-weight="700" fill="#111827">The rule: never guess</text>
+  <text x="76" y="482" font-size="15" fill="#374151">Anything it can't be sure of (an unsupported function, macros, circular references, text Excel might read as a date)</text>
+  <text x="76" y="504" font-size="15" fill="#374151">is marked "not verified" with the reason, instead of being given a value that might be wrong.</text>
+
+  <!-- Who uses it -->
+  <text x="600" y="580" text-anchor="middle" font-size="18" font-weight="700" fill="#111827">What you get out</text>
+  <g font-size="14" fill="#374151" text-anchor="middle">
+    <rect x="70" y="600" width="320" height="110" rx="12" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="230" y="634" font-weight="700" fill="#065f46">For AI agents</text>
+    <text x="230" y="660">Clean JSON and text they can read</text>
+    <text x="230" y="682">without misreading the spreadsheet</text>
+
+    <rect x="440" y="600" width="320" height="110" rx="12" fill="#eff6ff" stroke="#bfdbfe"/>
+    <text x="600" y="634" font-weight="700" fill="#1e3a8a">For developers</text>
+    <text x="600" y="660">Spreadsheet logic as Python that</text>
+    <text x="600" y="682">recalculates with new inputs</text>
+
+    <rect x="810" y="600" width="320" height="110" rx="12" fill="#fffbeb" stroke="#fde68a"/>
+    <text x="970" y="634" font-weight="700" fill="#92400e">For auditors &amp; risk teams</text>
+    <text x="970" y="660">Evidence of exactly what was</text>
+    <text x="970" y="682">proven, tested, or left unchecked</text>
+  </g>
+</svg>
