@@ -8,10 +8,10 @@ Escalations: mcp-review@anthropic.com
 
 - [x] Server deployed and reachable at `https://mcp-production-5fd2.up.railway.app/mcp` (Railway, `railway up` from this folder)
 - [x] `https://mcp-production-5fd2.up.railway.app/` (docs) and `https://mcp-production-5fd2.up.railway.app/privacy` load
-- [ ] Added in Claude as a custom connector (Settings → Connectors → Add custom connector) and every tool called once from a chat
+- [x] Added in Claude as a custom connector and all nine tools called through it (2026-10-10, reviewer script steps 1–6 on the sample workbook: all `reproduced`, verdict `verified`)
 - [x] Public repo `slimboi34/provenance` (the docs, privacy and support links point there)
 - [x] Icon: 512×512 PNG at `docs/icon.png`
-- [x] Every tool has a `title` and `readOnlyHint` (all four are read-only in hosted mode)
+- [x] Every tool has a `title` and `readOnlyHint` (all nine are read-only in hosted mode)
 - [x] No authentication needed: the server only processes files the user sends; no account data
 - [x] Privacy policy: README section + `/privacy`
 
