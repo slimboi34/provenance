@@ -1214,7 +1214,7 @@ drop.ondrop = e => { e.preventDefault(); drop.style.background = '#f6fbf8'; e.da
 
 def _page(body: str) -> str:
     return ("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width'>"
-            "<title>Provenance MCP</title><style>body{font:16px/1.55 system-ui,sans-serif;max-width:46rem;"
+            "<title>Provenance MCP</title><link rel=icon type=image/png href=/icon.png><style>body{font:16px/1.55 system-ui,sans-serif;max-width:46rem;"
             "margin:3rem auto;padding:0 1.2rem;color:#1d1d1f}code{background:#f2f2f4;padding:.1em .3em;"
             "border-radius:4px}h2{margin-top:2rem}</style><body>" + body + "</body></html>")
 
@@ -1233,6 +1233,7 @@ def _add_pages(server) -> None:
         return HTMLResponse(_page(PRIVACY))
 
     @server.custom_route("/icon.png", methods=["GET"])
+    @server.custom_route("/favicon.ico", methods=["GET"])
     async def icon(request):
         return Response((Path(__file__).parent / "static" / "icon.png").read_bytes(), media_type="image/png",
                         headers={"Cache-Control": "public, max-age=86400"})
