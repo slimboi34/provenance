@@ -1295,14 +1295,50 @@ def main(argv: list[str] | None = None) -> int:
     if not args.http:
         server.run(transport="stdio")
         return 0
-    import anyio
+    import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
     _add_pages(server)
-    anyio.run(lambda: server.run_streamable_http_async(
-        host=args.host, port=args.port, stateless_http=True, json_response=True,
-        max_request_body_size=MAX_BYTES * 4 // 3 + 65536,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False)))
+    app = server.streamable_http_app(
+        stateless_http=True, json_response=True, max_request_body_size=MAX_BYTES * 4 // 3 + 65536,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False), host=args.host)
+    uvicorn.run(_friendly_get(app), host=args.host, port=args.port, log_level="info", proxy_headers=True,
+                forwarded_allow_ips="*")
     return 0
+
+
+MCP_PAGE = """\
+<img src="/icon.png" width=56 height=56 alt="">
+<h1>This is an MCP connector address</h1>
+<p>It is working. It is meant to be added to Claude, not opened in a browser.</p>
+<p>In Claude: <b>Settings &rarr; Connectors &rarr; Add custom connector</b>, and paste
+<code>{url}</code>. No sign-in is needed.</p>
+<p><a href="/">About Provenance</a> &middot; <a href="/upload">Upload a workbook</a> &middot;
+<a href="/privacy">Privacy</a></p>
+"""
+
+
+def _friendly_get(app):
+    """GET /mcp: a page for browsers, an immediate 405 for anything else.
+
+    The server is stateless and sends no server-initiated messages, so it offers no
+    SSE stream on GET (the spec allows 405); without this a plain GET held the
+    connection open forever and a browser saw a bare 406.
+    """
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "GET" and scope["path"].rstrip("/") == "/mcp":
+            from starlette.requests import Request
+            from starlette.responses import HTMLResponse, PlainTextResponse
+            request = Request(scope)
+            if "text/html" in request.headers.get("accept", ""):
+                url = str(request.url.replace(query="")).replace("http://", "https://", 1)
+                response = HTMLResponse(_page(MCP_PAGE.replace("{url}", url)))
+            else:
+                response = PlainTextResponse("This MCP server does not offer a GET stream; send JSON-RPC with POST.\n",
+                                             status_code=405, headers={"Allow": "POST"})
+            await response(scope, receive, send)
+            return
+        await app(scope, receive, send)
+    return wrapped
 
 
 if __name__ == "__main__":

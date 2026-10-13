@@ -119,6 +119,13 @@ def test_http_server(budget, tmp_path):
             async with Client(f"http://127.0.0.1:{port}/mcp") as client:
                 await _exercise(client, {"content_base64": base64.b64encode(budget).decode(),
                                          "filename": "budget.xlsx"}, remote=True)
+                # GET /mcp: a page for browsers, an immediate 405 for other clients (never a hanging stream).
+                page = urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
+                                                                     headers={"Accept": "text/html"}), timeout=5)
+                assert b"MCP connector address" in page.read()
+                with pytest.raises(urllib.error.HTTPError) as err:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/mcp", timeout=5)
+                assert err.value.code == 405
                 # The upload page flow: POST the file, then use its file_id.
                 request = urllib.request.Request(f"http://127.0.0.1:{port}/upload?name=budget.xlsx", data=budget,
                                                  method="POST")

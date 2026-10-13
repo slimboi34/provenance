@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Provenance Submission Kit</title>
+<style>
+  :root { --bg:#fafaf9; --card:#fff; --ink:#1c1c1a; --muted:#6b6b66; --line:#e4e4e0; --accent:#c96442; --ok:#2f7d4f; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#191918; --card:#232321; --ink:#ecebe6; --muted:#9d9c95; --line:#36362f; --accent:#e08a66; --ok:#5fbf86; }
+  }
+  :root[data-theme="dark"] { --bg:#191918; --card:#232321; --ink:#ecebe6; --muted:#9d9c95; --line:#36362f; --accent:#e08a66; --ok:#5fbf86; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif; }
+  main { max-width:820px; margin:0 auto; padding:28px 16px 80px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--accent); margin:32px 0 10px; }
+  .f { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:8px 0; }
+  .top { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .label { font-weight:600; font-size:13px; }
+  .note { color:var(--muted); font-size:12.5px; margin-top:2px; }
+  pre { margin:6px 0 0; white-space:pre-wrap; word-break:break-word; font:13.5px/1.5 ui-monospace,Menlo,monospace; }
+  button { font:inherit; font-size:12.5px; border:1px solid var(--line); background:var(--bg); color:var(--ink);
+           border-radius:7px; padding:4px 12px; cursor:pointer; flex-shrink:0; }
+  button:hover { border-color:var(--accent); }
+  button.done { color:var(--ok); border-color:var(--ok); }
+  .tip { border-left:3px solid var(--accent); padding:6px 12px; margin:8px 0; color:var(--muted); font-size:13.5px; }
+</style>
+<main>
+<h1>Provenance: connector submission kit</h1>
+<p class="sub">Work down the form in order. Click <b>Copy</b>, then paste into the field with the same name.</p>
+
+<h2>Step 3 · Listing</h2>
+<div class="tip">The form pre-filled <b>V1</b>. Replace it. The slug can't be changed after you submit.</div>
+<div class="f" data-label="Name">Provenance: Verified Excel</div>
+<div class="f" data-label="Slug" data-note="Permanent. If it's taken, use provenance-excel.">provenance</div>
+<div class="f" data-label="One-liner">Read Excel workbooks exactly, recalculate them with new inputs, and know which answers are verified against Excel's own results.</div>
+<div class="f" data-label="Description">Provenance gives Claude exact access to Excel workbooks (.xlsx, .xlsm). Instead of eyeballing a spreadsheet, Claude reads every cell and formula, recalculates the workbook in Python with Excel's semantics, and reports which results are verified.
+
+- Inspect and find: sheets, values and formulas as a table; search for any label, number or formula.
+- Explain and trace: how a cell is calculated, what feeds it, what depends on it, and whether it is verified.
+- What-if: change input cells and get every affected result, before and after, without Excel.
+- Goal seek: find the input that makes a result hit a target ("what price gets profit to 10,000?").
+- Sensitivity tables: one- or two-way data tables over ranges of inputs.
+- Compare: every changed value, formula and sheet between two versions of a workbook.
+- Convert and certify: lossless canonical JSON plus a Python module of every formula, with a certificate. Structure is proven by rebuilding the file, each formula is replayed against the result Excel stored, and the formulas are fuzz-tested against an independent engine.
+
+Formulas Provenance does not fully model are labelled unverified with the reason, never guessed, so Claude can tell you which numbers to trust.
+
+Give Claude a workbook by dropping it on the upload page (you get a file id to paste into your chat; the file is deleted after an hour) or by sharing a public https link (Google Sheets share links work). The hosted server handles typical workbooks (up to about 1 MB compressed); larger files run with the free local version. Nothing is kept after use.</div>
+<div class="f" data-label="Categories" data-note="Pick these from the dropdown (or the closest matches)." data-nocopy>Data &amp; Analytics · Productivity · Finance</div>
+<div class="f" data-label="Author name" data-note="Optional; blank uses your company name. Your name or brand, e.g.:">slimboi34</div>
+<div class="f" data-label="Author URL">https://github.com/slimboi34/provenance</div>
+<div class="f" data-label="Icon" data-note="Leave as is: the server now serves its own favicon. Or click “Add custom icon URL” and paste:">https://mcp-production-5fd2.up.railway.app/icon.png</div>
+
+<h2>Step 4 · Use cases</h2>
+<div class="tip">The form has three rows, each with a use case and an example prompt.</div>
+<div class="f" data-label="Use case 1">Answer questions about a spreadsheet from its exact cells and formulas</div>
+<div class="f" data-label="Example prompt 1">Where is the tax figure in https://raw.githubusercontent.com/slimboi34/provenance/main/docs/sample-budget.xlsx and how is it calculated?</div>
+<div class="f" data-label="Use case 2">What-if analysis and goal seek on a financial or budget model</div>
+<div class="f" data-label="Example prompt 2">In that budget workbook, what widget quantity (Budget!B2) makes the total (Budget!D6) exactly 100?</div>
+<div class="f" data-label="Use case 3">Audit a workbook and see which results are verified against Excel</div>
+<div class="f" data-label="Example prompt 3">Convert that workbook and tell me whether every formula reproduces Excel's results.</div>
+<div class="f" data-label="Prerequisites">None. No account or sign-in is needed. Users give Claude a workbook as a public https link (Google Sheets share links work) or upload it at https://mcp-production-5fd2.up.railway.app/upload and paste the file id it gives.</div>
+<div class="f" data-label="Read / write capabilities" data-note="Choose “Read only” (already selected). Every tool is annotated readOnlyHint." data-nocopy>Read only</div>
+
+<h2>Step 5 · Company</h2>
+<div class="f" data-label="Website / documentation URL">https://mcp-production-5fd2.up.railway.app/</div>
+<div class="f" data-label="Privacy policy URL">https://mcp-production-5fd2.up.railway.app/privacy</div>
+<div class="f" data-label="Support URL">https://github.com/slimboi34/provenance/issues</div>
+<div class="f" data-label="Source code">https://github.com/slimboi34/provenance</div>
+
+<h2>Step 6 · Authentication</h2>
+<div class="f" data-label="Auth type" data-note="Choose “None” / “No authentication”." data-nocopy>None</div>
+<div class="f" data-label="Explanation">None. The server holds no user accounts and acts on nothing but the file sent in each call.</div>
+
+<h2>Step 7 · Data handling</h2>
+<div class="f" data-label="Data handling">Own software; no third-party API. The server only fetches a URL the user supplies. Each workbook is processed in a short-lived sandboxed process and deleted when the call finishes; files on the upload page are deleted within one hour. No database, no cache across calls, no account data. Logs record time, status and duration only, never file contents, URLs or cell values. No health data, no sponsored content, nothing used for training.</div>
+
+<h2>Step 8 · Test &amp; launch</h2>
+<div class="f" data-label="Server URL">https://mcp-production-5fd2.up.railway.app/mcp</div>
+<div class="f" data-label="Test credentials">None needed. The server has no authentication.</div>
+<div class="f" data-label="Sample workbook">https://raw.githubusercontent.com/slimboi34/provenance/main/docs/sample-budget.xlsx</div>
+<div class="f" data-label="Reviewer instructions">No credentials needed. Add https://mcp-production-5fd2.up.railway.app/mcp as a custom connector, then:
+1. "Inspect this workbook: https://raw.githubusercontent.com/slimboi34/provenance/main/docs/sample-budget.xlsx"
+2. "Where is the tax figure, and how is it calculated? Trace it back to its inputs."
+3. "Set Budget!B2 to 40 and tell me the new total." (expect 112)
+4. "What quantity of widgets (B2) makes the total (D6) exactly 100?" (expect 35.2)
+5. "Show how the tax (D12) changes as the VAT rate (Rates!B1) goes from 0% to 30%."
+6. "Compare it with itself" and "Convert it and give me the verdict." (expect verified)
+7. Upload flow: open https://mcp-production-5fd2.up.railway.app/upload, drop the sample file, paste the line it gives into the chat, and ask anything above.</div>
+
+<h2>Step 9 · Compliance</h2>
+<div class="tip">Read these yourself and tick what's true. They're agreements made in your name, so I haven't pre-answered them. The facts: read-only tools, no authentication, no third-party APIs, no health data, no ads, nothing kept after use.</div>
+
+<h2>Step 10 · Review and submit</h2>
+<div class="tip">Check that the Name isn't “V1” and the slug is right, then click Submit. For questions about the review, email mcp-review@anthropic.com.</div>
+</main>
+<script>
+document.querySelectorAll(".f").forEach(el => {
+  const text = el.textContent.trim();
+  const label = el.dataset.label, note = el.dataset.note;
+  el.innerHTML = "";
+  const top = document.createElement("div"); top.className = "top";
+  const l = document.createElement("div");
+  l.innerHTML = '<div class="label"></div>' + (note ? '<div class="note"></div>' : "");
+  l.querySelector(".label").textContent = label;
+  if (note) l.querySelector(".note").textContent = note;
+  top.appendChild(l);
+  if (!("nocopy" in el.dataset)) {
+    const b = document.createElement("button"); b.textContent = "Copy";
+    b.onclick = async () => {
+      try { await navigator.clipboard.writeText(text); }
+      catch { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+      b.textContent = "Copied ✓"; b.classList.add("done");
+    };
+    top.appendChild(b);
+  }
+  const pre = document.createElement("pre"); pre.textContent = text;
+  el.append(top, pre);
+});
+</script>
+</html>
